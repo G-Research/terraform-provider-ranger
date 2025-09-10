@@ -1,5 +1,8 @@
 default: fmt lint install generate
 
+tools:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.4.0
+
 build:
 	go build -v ./...
 
@@ -21,4 +24,4 @@ test:
 testacc:
 	TF_ACC=1 go test -v -cover -timeout 120m ./...
 
-.PHONY: fmt lint test testacc build install generate
+.PHONY: fmt lint tools test testacc build install generate

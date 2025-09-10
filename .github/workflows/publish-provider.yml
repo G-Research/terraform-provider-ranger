@@ -1,0 +1,104 @@
+name: Publish Terraform Provider
+
+on:
+  workflow_call:
+    secrets:
+      tfe_token:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: publish
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract short version
+        id: extract_version
+        run: |
+          REF_NAME="${{ github.ref }}"
+          TAG_NAME="${REF_NAME#refs/tags/}"
+          FULL_VERSION="${TAG_NAME#v}"
+          SHORT_VERSION=$(echo "$FULL_VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "short_version=$SHORT_VERSION" >> $GITHUB_ENV
+          echo "full_version=$FULL_VERSION" >> $GITHUB_ENV
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download v${{ env.full_version }} --repo ${{ github.repository }} --dir dist/
+
+      - name: Create version.json
+        run: |
+          cat <<EOF > version.json
+          {
+            "data": {
+              "type": "registry-provider-versions",
+              "attributes": {
+                "version": "${{ env.short_version }}",
+                "key-id": "${{ vars.TFE_KEY_ID }}",
+                "protocols": ["5.0"]
+              }
+            }
+          }
+          EOF
+
+      - name: Create provider version in Terraform Enterprise
+        id: create_version
+        env:
+          TOKEN: ${{ secrets.tfe_token }}
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            --header "Authorization: Bearer $TOKEN" \
+            --header "Content-Type: application/vnd.api+json" \
+            --data @version.json \
+            https://app.terraform.io/api/v2/organizations/GR-OSS/registry-providers/private/GR-OSS/ranger/versions)
+
+          echo "shasums_upload=$(echo $RESPONSE | jq -r '.data.links."shasums-upload"')" >> $GITHUB_ENV
+          echo "shasums_sig_upload=$(echo $RESPONSE | jq -r '.data.links."shasums-sig-upload"')" >> $GITHUB_ENV
+
+      - name: Upload SHA256SUMS
+        run: |
+          curl -T dist/terraform-provider-ranger_${{ env.full_version }}_SHA256SUMS ${{ env.shasums_upload }}
+
+      - name: Upload SHA256SUMS.sig
+        run: |
+          curl -T dist/terraform-provider-ranger_${{ env.full_version }}_SHA256SUMS.sig ${{ env.shasums_sig_upload }}
+
+      - name: Process and Upload Provider Binaries
+        env:
+          TOKEN: ${{ secrets.tfe_token }}
+        run: |
+          for file in dist/*.zip; do
+          filename=$(basename "$file")
+          os=$(echo $filename | awk -F'_' '{print $(NF-1)}')
+          arch=$(echo $filename | awk -F'_' '{print $NF}' | sed 's/.zip//')
+          shasum=$(sha256sum $file | awk '{print $1}')
+
+          cat <<EOF > platform.json
+          {
+            "data": {
+              "type": "registry-provider-platforms",
+              "attributes": {
+                "os": "$os",
+                "arch": "$arch",
+                "shasum": "$shasum",
+                "filename": "$filename"
+              }
+            }
+          }
+          EOF
+
+          PLATFORM_RESPONSE=$(curl -s -X POST \
+            --header "Authorization: Bearer $TOKEN" \
+            --header "Content-Type: application/vnd.api+json" \
+            --data @platform.json \
+            https://app.terraform.io/api/v2/organizations/GR-OSS/registry-providers/private/GR-OSS/ranger/versions/${{ env.short_version }}/platforms)
+          
+          provider_binary_upload=$(echo $PLATFORM_RESPONSE | jq -r '.data.links."provider-binary-upload"')
+
+          curl -T "$file" "$provider_binary_upload"
+          done
